@@ -11,6 +11,7 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
     super(scope, id, props);
 
     //Service Discovery private DNS NameSpace
+    //creating constants - used as DNS name in CloudMap
     const privateDomainName = "colordemo.local"
     const meshName = "colormesh"
 
@@ -32,6 +33,7 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
     }
 
     //new vpc
+    //Creating VPC in perticular region with CIDR block
     const vpc = new ec2.Vpc(this, 'CDK-Fargate-VPC', {
       cidr: '10.88.0.0/16',
       maxAzs: 3
@@ -69,7 +71,11 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
         unhealthyThreshold: 2
       }
     }
-
+    
+    //Creating virtual nodes inside AppMesh
+    //virtual node represent actual service running in ECS fargate
+    //we have four nodes white, black, blue, red. 
+    //using cloud map as service discovery method DNS name (colordemo.local)
     const virtualNodes = ["colorteller-white", "colorteller-black", "colorteller-blue", "colorteller-red"]
     let virtualNode = new Array();;
     for (var v = 0; v < virtualNodes.length; v++) {
@@ -88,7 +94,9 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       })
       virtualNode[v].addDependsOn(colormesh)
     }
-
+    
+    //Virtual Route
+    //creating virtual route that have rules for routing(next block)  
     const colortellerVirtualRouter = new appmesh.CfnVirtualRouter(this, "vr-colorteller", {
       virtualRouterName: "colorteller-vr",
       meshName: meshName,
@@ -103,6 +111,8 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
     })
     colortellerVirtualRouter.addDependsOn(colormesh)
 
+    //route actually points towards the virtual nodes
+    //In this block it points towards colorteller-blue-vn with weigth-1, meaning all traffic route towards to this virtual node
     const route = new appmesh.CfnRoute(this, 'route-colorteller', {
       meshName: meshName,
       virtualRouterName: "colorteller-vr",
@@ -127,6 +137,8 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       route.addDependsOn(virtualNode[v]);
     }
 
+    //virtual service
+    //name of virtual service is actual DNS name of your service in our case its DNS name of white virtual node
     new appmesh.CfnVirtualService(this, 'vs-colorteller', {
       meshName: meshName,
       virtualServiceName: 'colorteller.' + privateDomainName,
@@ -137,7 +149,8 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       }
     }).addDependsOn(colortellerVirtualRouter)
 
-
+    //gateway virtual 
+    //node which point or take virtual service as backend meaning it point to the virtual service 
     new appmesh.CfnVirtualNode(this, "vn-colorgateway", {
       meshName: meshName,
       virtualNodeName: "colorgateway-vn",
@@ -195,7 +208,9 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       memoryLimitMiB: 512,
       taskRole: taskIAMRole
     });
-
+    
+    //creating container for gateway task 
+    //using image kopi/colorgateway:latest
     const colorgatwayContainer = colorgatewayTaskDefinition.addContainer('colorgateway', {
       image: ecs.ContainerImage.fromRegistry('kopi/colorgateway:latest'),
       environment: {
@@ -212,6 +227,8 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       containerPort: 9080
     })
 
+    //envoy container for gatewy task 
+    //using image kopi/appmesh:latest
     const envoyContainer = colorgatewayTaskDefinition.addContainer('envoy', {
       image: ecs.ContainerImage.fromRegistry('kopi/appmesh:latest'),
       environment: {
@@ -272,6 +289,9 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       ],
     });
 
+    //ECS cluster service for gateway
+    //using cloud map to connect it with virtual node using virtual gateways nodes DNS 
+    //using above task defination 
     const colorgatewayService = new ecs.FargateService(this, 'colorgateway-service', {
       cluster: fgCluster,
       desiredCount: 1,
@@ -282,6 +302,7 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
       }
     });
 
+    //connecting it to load balancer so we can use this gateway service to call color teller application
     const externalLB = new elbv2.ApplicationLoadBalancer(this, 'external', {
       vpc: vpc,
       internetFacing: true
@@ -300,9 +321,12 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
 
 
     // Colors Services
+    // we have 4 service for for virtual nodes created in app mesh 
     const colorTellers = ["white", "black", "red", "blue",]
     let colorTellersTaskDefinition = new Array()
 
+    //task defination for colorteller application
+    //creating container and envoy proxy
     for (var v = 0; v < colorTellers.length; v++) {
       colorTellersTaskDefinition[v] = new ecs.FargateTaskDefinition(this, 'colorteller-' + colorTellers[v] + '-task-definition', {
         taskRole: taskIAMRole
@@ -380,7 +404,7 @@ export class FargateAppmeshCdkStack extends cdk.Stack {
         ],
       });
 
-
+      //service inside ECS cluster and linking it with respective 4 virtual nodes in app mesh 
       let fgServiceName = (colorTellers[v] == "white") ? "colorteller" : "colorteller-" + colorTellers[v]
       new ecs.FargateService(this, 'colorteller-' + colorTellers[v] + '-service', {
         cluster: fgCluster,
